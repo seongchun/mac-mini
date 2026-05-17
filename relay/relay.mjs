@@ -13,7 +13,7 @@
 //
 // Designed to run under launchd (macOS) or NSSM/Task Scheduler (Windows).
 
-import { spawn, execSync } from 'node:child_process';
+import { spawn, spawnSync, execSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -121,6 +121,59 @@ function resolveWorkspace(name, { create = true } = {}) {
   }
   if (create) fs.mkdirSync(full, { recursive: true });
   return full;
+}
+
+// ── workspace branch convention: dispatch/<workspace> ────────────────────────
+function git(args, cwd) {
+  try {
+    const r = spawnSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    return { code: r.status ?? -1, stdout: (r.stdout || '').trim(), stderr: (r.stderr || '').trim() };
+  } catch (e) {
+    return { code: -1, stdout: '', stderr: e.message };
+  }
+}
+
+function workingTreeClean(cwd) {
+  const r = git(['status', '--porcelain'], cwd);
+  return r.code === 0 && r.stdout === '';
+}
+
+function currentBranch(cwd) {
+  const r = git(['symbolic-ref', '--short', 'HEAD'], cwd);
+  return r.code === 0 ? r.stdout : null;
+}
+
+// Ensure workspace dir is on `dispatch/<workspace>` branch.
+// - initIfMissing=true: run `git init` first if not a repo (used by new_session).
+// - initIfMissing=false: leave non-git workspaces alone (used by run_claude).
+// - Refuses to switch if the working tree is dirty (preserves in-flight work).
+function ensureDispatchBranch(dir, workspaceName, { initIfMissing = false } = {}) {
+  const branch = `dispatch/${safeName(workspaceName)}`;
+  const dotGit = path.join(dir, '.git');
+  if (!fs.existsSync(dotGit)) {
+    if (!initIfMissing) return null;
+    const init = git(['init'], dir);
+    if (init.code !== 0) {
+      warn('[Git] init failed:', init.stderr.slice(0, 120));
+      return null;
+    }
+    git(['symbolic-ref', 'HEAD', `refs/heads/${branch}`], dir);
+    return branch;
+  }
+  const cur = currentBranch(dir);
+  if (cur === branch) return branch;
+  if (!workingTreeClean(dir)) {
+    warn('[Git] workspace', workspaceName, 'has uncommitted changes; staying on', cur || '(detached)');
+    return cur;
+  }
+  const co = git(['checkout', branch], dir);
+  if (co.code === 0) return branch;
+  const newco = git(['checkout', '-b', branch], dir);
+  if (newco.code !== 0) {
+    warn('[Git]', `checkout ${branch} failed:`, newco.stderr.slice(0, 120));
+    return cur;
+  }
+  return branch;
 }
 
 // ── heartbeat / liveness ──────────────────────────────────────────────────────
@@ -309,7 +362,8 @@ function listSessions() {
 // ── action: new_session ───────────────────────────────────────────────────────
 function newSession(name) {
   const dir = resolveWorkspace(name, { create: true });
-  return `created ${dir}`;
+  const branch = ensureDispatchBranch(dir, name, { initIfMissing: true });
+  return branch ? `created ${dir} on ${branch}` : `created ${dir}`;
 }
 
 // ── dispatch a command row ────────────────────────────────────────────────────
@@ -357,11 +411,14 @@ async function processCommand(cmd) {
           taskPreview: (payload.task || '').slice(0, 80),
         });
       } else {
-        opts = { mode: 'workspace', cwd: resolveWorkspace(payload.session), fresh: payload.fresh };
+        const wsDir = resolveWorkspace(payload.session);
+        const branch = ensureDispatchBranch(wsDir, payload.session, { initIfMissing: false });
+        opts = { mode: 'workspace', cwd: wsDir, fresh: payload.fresh };
         sysLog('info', 'run_claude_start', {
           id: cmd.id.slice(0, 12),
           mode: 'workspace',
           session: payload.session,
+          branch,
           taskPreview: (payload.task || '').slice(0, 80),
         });
       }
