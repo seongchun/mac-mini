@@ -27,3 +27,25 @@ Both repos are designed to be used with a single Claude Code web
 as a fallback; `DISPATCH_SECRET` must live in the web environment config
 (or a local `.env`) since it is a real secret and must match the value the
 Mac mini relay is running with.
+
+## Branch convention: `dispatch/<workspace>`
+
+Every task tied to a relay workspace runs on a branch named
+`dispatch/<workspace>`, where `<workspace>` is the same identifier used for
+the Mac/Victus workspace directory and for `sessions` listings. The
+workspace name is the single source of truth that joins cloud sessions,
+the home-machine workspace dir, and the git branch.
+
+Rules for Claude:
+
+- When starting work in a workspace (whether on cloud or a home machine),
+  check out or create `dispatch/<workspace>` before the first commit. If
+  the harness has auto-assigned a different branch (e.g. `claude/...`),
+  rename it: `git branch -m dispatch/<workspace>`.
+- Don't encode the device name in the branch. A task that migrates between
+  mac-mini, victus, and cloud keeps the same `dispatch/<workspace>` branch
+  — device identity lives in commit metadata and `sys_log`, not in the
+  branch name.
+- One-off cloud sessions that aren't tied to a relay workspace (e.g.
+  ad-hoc fixes to this repo) may keep the harness-assigned `claude/...`
+  branch.
